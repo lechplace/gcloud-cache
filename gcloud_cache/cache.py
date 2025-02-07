@@ -5,10 +5,13 @@ import hashlib
 import os
 from google.api_core.exceptions import Forbidden, NotFound
 from functools import wraps
+import asyncio
+import mimetypes
+import base64
 
 def serialize_args(args, kwargs):
-    args_filtered = [arg for arg in args if not hasattr(arg, '__dict__')]
-    kwargs_filtered = {k: v for k, v in kwargs.items() if not hasattr(v, '__dict__')}
+    args_filtered = [base64.b64encode(arg).decode('utf-8') if isinstance(arg, bytes) else arg for arg in args]
+    kwargs_filtered = {k: (base64.b64encode(v).decode('utf-8') if isinstance(v, bytes) else v) for k, v in kwargs.items()}
     return args_filtered, kwargs_filtered
 
 with open('local/cloud_storage.yaml', 'r') as f:
@@ -46,21 +49,67 @@ def get_hash(*args, **kwargs):
     return hash_object.hexdigest()
 
 def get_cached_response(hash_key):
+    """Pobiera wynik z Google Cloud Storage, obsługując pliki binarne i JSON."""
     bucket = storage_client.bucket(BUCKET_NAME)
-    blob = bucket.blob(f"cache/{hash_key}.json")
-    if blob.exists():
-        return json.loads(blob.download_as_text())
-    return None
+    
+    # Sprawdź, czy istnieje plik binarny (plik .bin)
+    blob_bin = bucket.blob(f"cache/{hash_key}.bin")
+    if blob_bin.exists():
+        # Pobieramy dane binarne bezpośrednio
+        return blob_bin.download_as_bytes()
+
+    # Sprawdź, czy istnieje plik JSON
+    blob_json = bucket.blob(f"cache/{hash_key}.json")
+    if blob_json.exists():
+        return json.loads(blob_json.download_as_text())
+
+    return None  # Brak danych w cache
 
 def save_to_cache(hash_key, result):
+    """Zapisuje wynik w Google Cloud Storage jako JSON lub plik binarny."""
     bucket = storage_client.bucket(BUCKET_NAME)
-    blob = bucket.blob(f"cache/{hash_key}.json")
-    blob.upload_from_string(json.dumps(result), content_type="application/json")
+
+    if isinstance(result, bytes):  # Jeśli wynik to dane binarne
+        blob = bucket.blob(f"cache/{hash_key}.bin")
+        blob.upload_from_string(result, content_type="application/octet-stream")
+        print(f"📤 Dane binarne zapisane w Cloud Storage jako {blob.name}")
+    elif isinstance(result, str) and os.path.exists(result):  # Jeśli wynik to plik
+        # Pobierz MIME na podstawie rozszerzenia pliku
+        mime_type, _ = mimetypes.guess_type(result)
+        mime_type = mime_type or "application/octet-stream"
+
+        blob = bucket.blob(f"cache/{hash_key}.bin")
+        blob.upload_from_filename(result, content_type=mime_type)
+        
+        print(f"📤 Plik {result} zapisany w Cloud Storage jako {blob.name} ({mime_type})")
+    else:
+        blob = bucket.blob(f"cache/{hash_key}.json")
+        blob.upload_from_string(json.dumps(result), content_type="application/json")
+        print(f"✅ Dane JSON zapisane w Cloud Storage jako {blob.name}")
 
 def cache_result(func):
     @wraps(func)
-    def wrapper(*args, **kwargs):
-        hash_key = get_hash(*args, **kwargs)
+    async def async_wrapper(*args, **kwargs):
+        # Filtruj argumenty, aby usunąć nieserializowalne obiekty
+        filtered_args = [arg for arg in args if isinstance(arg, (str, int, float, bytes, list, dict, tuple))]
+        filtered_kwargs = {k: v for k, v in kwargs.items() if isinstance(v, (str, int, float, bytes, list, dict, tuple))}
+        
+        hash_key = get_hash(*filtered_args, **filtered_kwargs)
+        cached_response = get_cached_response(hash_key)
+        if cached_response is not None:
+            print("Using cached result")
+            return cached_response
+        result = await func(*args, **kwargs)
+        save_to_cache(hash_key, result)
+        return result
+    
+    @wraps(func)
+    def sync_wrapper(*args, **kwargs):
+        # Filtruj argumenty, aby usunąć nieserializowalne obiekty
+        filtered_args = [arg for arg in args if isinstance(arg, (str, int, float, bytes, list, dict, tuple))]
+        filtered_kwargs = {k: v for k, v in kwargs.items() if isinstance(v, (str, int, float, bytes, list, dict, tuple))}
+        
+        hash_key = get_hash(*filtered_args, **filtered_kwargs)
         cached_response = get_cached_response(hash_key)
         if cached_response is not None:
             print("Using cached result")
@@ -68,4 +117,5 @@ def cache_result(func):
         result = func(*args, **kwargs)
         save_to_cache(hash_key, result)
         return result
-    return wrapper
+    
+    return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper

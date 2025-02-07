@@ -1,12 +1,13 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='gcloud-cache',
-    version='0.1.0',
+    name='gcloud_cache',
+    version='0.1.4',
     packages=find_packages(),
     install_requires=[
         'google-cloud-storage',
-        'pyyaml'
+        'pyyaml',
+        'fpdf',
     ],
     author='Your Name',
     author_email='lech.hubicki@gmail.com',

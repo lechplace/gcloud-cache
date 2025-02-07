@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+dist/
+build/
+local/
+*.egg-info/
+*.egg
+*.log 
+venv/
+.idea/
+.vscode/
+*.swp
+*.swo

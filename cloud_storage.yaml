@@ -1,0 +1,2 @@
+bucket_name: sample-bucket-name # move this file to local/cloud_storage.yaml
+credentials_path: local/service_account.json

@@ -15,6 +15,12 @@ Cloud Cache is a Python package for caching data and files in Google Cloud Stora
 pip install gcloud_cache
 ```
 
+Installing locally:
+```sh
+python setup.py clean --all
+python setup.py sdist bdist_wheel
+twine upload dist/*
+```
 ## Usage
 
 ### Basic Caching Example

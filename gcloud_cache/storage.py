@@ -9,7 +9,7 @@ def create_bucket(bucket_name):
     print(f"Bucket {bucket.name} created")
 
 def ensure_bucket_exists():
-    with open('cloud_storage.yaml', 'r') as f:
+    with open('local/cloud_storage.yaml', 'r') as f:
         config = yaml.safe_load(f)
     bucket_name = config.get('bucket_name')
     credentials_path = config.get('credentials_path')

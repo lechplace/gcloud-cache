@@ -1,22 +1,17 @@
-from google.cloud import storage
-import json
-import yaml
 import hashlib
-import os
-from google.api_core.exceptions import Forbidden, NotFound
-from functools import wraps
-import asyncio
-import mimetypes
 import base64
 import zipfile
 import io
 import inspect
+import pickle
+from google.cloud import storage
+import yaml
+import os
+from google.api_core.exceptions import Forbidden, NotFound
+from functools import wraps
+import asyncio
 
-def serialize_args(args, kwargs):
-    args_filtered = [base64.b64encode(arg).decode('utf-8') if isinstance(arg, bytes) else arg for arg in args]
-    kwargs_filtered = {k: (base64.b64encode(v).decode('utf-8') if isinstance(v, bytes) else v) for k, v in kwargs.items()}
-    return args_filtered, kwargs_filtered
-
+# Load configuration
 try:
     with open('local/cloud_storage.yaml', 'r') as f:
         config = yaml.safe_load(f)
@@ -36,35 +31,34 @@ if CREDENTIALS_PATH:
 
 storage_client = storage.Client()
 
-def create_bucket(bucket_name):
-    bucket = storage_client.create_bucket(bucket_name)
-    print(f"Bucket {bucket.name} created")
+# Pomocnicza funkcja do zapisu deterministycznego do archiwum ZIP
+def deterministic_writestr(zip_file, arcname, data):
+    info = zipfile.ZipInfo(arcname)
+    # Ustalony czas – na przykład 1980-01-01 00:00:00
+    info.date_time = (1980, 1, 1, 0, 0, 0)
+    # Ustalona metoda kompresji
+    info.compress_type = zipfile.ZIP_DEFLATED
+    zip_file.writestr(info, data)
 
-def ensure_bucket_exists():
-    try:
-        bucket = storage_client.get_bucket(BUCKET_NAME)
-        print(f'Bucket {BUCKET_NAME} already exists.')
-    except NotFound:
-        print(f'Bucket {BUCKET_NAME} not found. Creating it...')
-        try:
-            create_bucket(BUCKET_NAME)
-        except Forbidden:
-            print(f'Permission denied to create bucket {BUCKET_NAME}.')
-
-def serialize_args_to_zip(func, args, kwargs):
+def serialize_args(args, kwargs):
     args_filtered = [base64.b64encode(arg).decode('utf-8') if isinstance(arg, bytes) else arg for arg in args]
     kwargs_filtered = {k: (base64.b64encode(v).decode('utf-8') if isinstance(v, bytes) else v) for k, v in kwargs.items()}
+    return args_filtered, kwargs_filtered
+
+def serialize_args_to_zip(func, args, kwargs):
+    args_filtered, kwargs_filtered = serialize_args(args, kwargs)
     
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
-        # Dodaj kod funkcji do pliku ZIP
+        # Dodaj kod funkcji do archiwum z ustalonymi metadanymi
         func_code = inspect.getsource(func)
-        zip_file.writestr('function_code.py', func_code)
+        deterministic_writestr(zip_file, 'function_code.py', func_code)
         
         for i, arg in enumerate(args_filtered):
-            zip_file.writestr(f'arg_{i}.txt', str(arg))
-        for k, v in kwargs_filtered.items():
-            zip_file.writestr(f'kwarg_{k}.txt', str(v))
+            deterministic_writestr(zip_file, f'arg_{i}.txt', str(arg))
+        # Sortujemy kwargs, aby kolejność była deterministyczna
+        for k, v in sorted(kwargs_filtered.items()):
+            deterministic_writestr(zip_file, f'kwarg_{k}.txt', str(v))
     
     zip_buffer.seek(0)
     return zip_buffer
@@ -79,12 +73,21 @@ def get_cached_response(hash_key):
     bucket = storage_client.bucket(BUCKET_NAME)
     blob = bucket.blob(f"cache/{hash_key}.zip")
     if blob.exists():
-        return blob.download_as_bytes()
+        zip_buffer = io.BytesIO(blob.download_as_bytes())
+        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+            with zip_file.open('result') as result_file:
+                data = result_file.read()
+                return pickle.loads(data)
     return None
 
-def save_to_cache(hash_key, zip_buffer):
+def save_to_cache(hash_key, zip_buffer, result):
     bucket = storage_client.bucket(BUCKET_NAME)
     blob = bucket.blob(f"cache/{hash_key}.zip")
+    serialized_result = pickle.dumps(result)
+    # Zapisz wynik do archiwum z tym samym, deterministycznym zapisem
+    with zipfile.ZipFile(zip_buffer, 'a') as zip_file:
+        deterministic_writestr(zip_file, 'result', serialized_result)
+    zip_buffer.seek(0)
     blob.upload_from_file(zip_buffer, content_type="application/zip")
     print(f"📤 Plik ZIP zapisany w Cloud Storage jako {blob.name}")
 
@@ -98,7 +101,7 @@ def cache_result(func):
             print("Using cached result")
             return cached_response
         result = await func(*args, **kwargs)
-        save_to_cache(hash_key, zip_buffer)
+        save_to_cache(hash_key, zip_buffer, result)
         return result
     
     @wraps(func)
@@ -110,7 +113,7 @@ def cache_result(func):
             print("Using cached result")
             return cached_response
         result = func(*args, **kwargs)
-        save_to_cache(hash_key, zip_buffer)
+        save_to_cache(hash_key, zip_buffer, result)
         return result
     
     return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
